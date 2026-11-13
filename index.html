@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!--
-  NET WORTH — Personal Finance PWA v2.6
+  NET WORTH — Personal Finance PWA v2.6.1
   ======================================
   HOW TO DEPLOY TO IPHONE:
   1. Upload index.html + Net_Worth_App_Logo.png to GitHub Pages repo
@@ -408,7 +408,7 @@
       <div class="chart-container"><canvas id="chart-nw-trend"></canvas></div>
       <div id="nw-trend-legend" style="display:flex;gap:16px;margin-top:10px;flex-wrap:wrap;"></div>
     </div>
-    <div style="text-align:center;padding:20px 16px 8px;font-size:12px;color:#94A3B8;letter-spacing:0.3px;"><strong style="color:#B0B8C4;">Net Worth</strong> v2.6 · by Suski</div>
+    <div style="text-align:center;padding:20px 16px 8px;font-size:12px;color:#94A3B8;letter-spacing:0.3px;"><strong style="color:#B0B8C4;">Net Worth</strong> v2.6.1 · by Suski</div>
     <div class="section-spacer"></div>
   </div>
 
@@ -786,7 +786,7 @@ const SUPABASE_URL = 'https://vaizzdeogxqbpyffacth.supabase.co';
 const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZhaXp6ZGVvZ3hxYnB5ZmZhY3RoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIxOTYyNTUsImV4cCI6MjA5Nzc3MjI1NX0.6LZt00DmWjE26ZUySYpoeaajrwqgeoxgB2tP0ZLkdlI';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
 
-const APP_VERSION = '2.6';
+const APP_VERSION = '2.6.1';
 
 /* --- cache-busting: force reload if cached version differs --- */
 (function checkVersion() {
@@ -3054,6 +3054,9 @@ document.getElementById('sign-toggle').addEventListener('click',()=>{
    ============================================================ */
 function openModal() {
   editingId=null;
+  // Reset save button in case a template edit was cancelled
+  window._editingTemplateId = null;
+  document.getElementById('modal-save-btn').onclick = saveTransaction;
   document.getElementById('modal-title-text').textContent='Add Transaction';
   document.getElementById('f-date').value=todayISO();
   setFieldValue('f-type','Expense');
@@ -3241,7 +3244,8 @@ function updateFormFields() {
 /* ============================================================
    SAVE TRANSACTION
    ============================================================ */
-document.getElementById('modal-save-btn').addEventListener('click',saveTransaction);
+// Single handler slot (onclick) so edit/template flows replace it instead of stacking a second save
+document.getElementById('modal-save-btn').onclick = saveTransaction;
 
 function saveTransaction() {
   const type=getFieldValue('f-type');
