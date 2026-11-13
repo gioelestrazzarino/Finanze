@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!--
-  NET WORTH — Personal Finance PWA v2.6.1
+  NET WORTH — Personal Finance PWA v2.7
   ======================================
   HOW TO DEPLOY TO IPHONE:
   1. Upload index.html + Net_Worth_App_Logo.png to GitHub Pages repo
@@ -408,7 +408,7 @@
       <div class="chart-container"><canvas id="chart-nw-trend"></canvas></div>
       <div id="nw-trend-legend" style="display:flex;gap:16px;margin-top:10px;flex-wrap:wrap;"></div>
     </div>
-    <div style="text-align:center;padding:20px 16px 8px;font-size:12px;color:#94A3B8;letter-spacing:0.3px;"><strong style="color:#B0B8C4;">Net Worth</strong> v2.6.1 · by Suski</div>
+    <div style="text-align:center;padding:20px 16px 8px;font-size:12px;color:#94A3B8;letter-spacing:0.3px;"><strong style="color:#B0B8C4;">Net Worth</strong> v2.7 · by Suski</div>
     <div class="section-spacer"></div>
   </div>
 
@@ -786,7 +786,7 @@ const SUPABASE_URL = 'https://vaizzdeogxqbpyffacth.supabase.co';
 const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZhaXp6ZGVvZ3hxYnB5ZmZhY3RoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIxOTYyNTUsImV4cCI6MjA5Nzc3MjI1NX0.6LZt00DmWjE26ZUySYpoeaajrwqgeoxgB2tP0ZLkdlI';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
 
-const APP_VERSION = '2.6.1';
+const APP_VERSION = '2.7';
 
 /* --- cache-busting: force reload if cached version differs --- */
 (function checkVersion() {
@@ -2752,6 +2752,7 @@ function openEditTemplateById(templateId) {
   }
   if(txn.type==='Transfer'){ setFieldValue('f-from-account',txn.account||''); setFieldValue('f-to-account',txn.toAccount||''); document.getElementById('f-amount').value=Math.abs(amt); }
 
+  document.querySelector('.recurring-toggle-row').style.display='';
   document.getElementById('f-recurring').checked = true;
   document.getElementById('fg-recurring-opts').style.display = '';
   setFieldValue('f-freq', template.frequency.charAt(0).toUpperCase()+template.frequency.slice(1));
@@ -2809,12 +2810,23 @@ function openEditTemplate(txnId) {
   // Find the matching recurring template for this transaction
   const t = data.transactions.find(x=>x.id===txnId); if(!t) return;
   const recurringList = data.recurringTransactions||[];
-  // Match by type, cat, sub, account, desc
-  const template = recurringList.find(r =>
-    r.templateTxn.type === t.type &&
-    r.templateTxn.desc === t.desc &&
-    r.templateTxn.account === t.account
-  );
+  // 1) Direct link (entries created from v2.7 on carry recurringId)
+  let template = t.recurringId!=null ? recurringList.find(r => r.id === t.recurringId) : null;
+  // 2) Older entries: strict match on all template fields
+  if(!template) {
+    const same = (a,b) => (a??'') === (b??'');
+    template = recurringList.find(r => {
+      const x = r.templateTxn;
+      return same(x.type,t.type) && same(x.desc,t.desc) && same(x.account,t.account) &&
+             same(x.toAccount,t.toAccount) && same(x.cat,t.cat) && same(x.sub,t.sub) &&
+             Number(x.amount) === Number(t.amount);
+    });
+    // 3) Template edited since: loose match (type, desc, account) only if exactly one candidate
+    if(!template) {
+      const loose = recurringList.filter(r => same(r.templateTxn.type,t.type) && same(r.templateTxn.desc,t.desc) && same(r.templateTxn.account,t.account));
+      if(loose.length === 1) template = loose[0];
+    }
+  }
   if(!template) { alert('Could not find the recurring template for this entry.'); return; }
 
   // Store template index for saving
@@ -2856,6 +2868,7 @@ function openEditTemplate(txnId) {
   if(txn.type==='Transfer'){ setFieldValue('f-from-account',txn.account||''); setFieldValue('f-to-account',txn.toAccount||''); document.getElementById('f-amount').value=Math.abs(amt); }
 
   // Lock recurring toggle ON and pre-fill freq/day
+  document.querySelector('.recurring-toggle-row').style.display='';
   document.getElementById('f-recurring').checked = true;
   document.getElementById('fg-recurring-opts').style.display = '';
   setFieldValue('f-freq', template.frequency.charAt(0).toUpperCase()+template.frequency.slice(1));
@@ -2914,6 +2927,10 @@ function openEditModal(id) {
   editingId=id;
   // Ensure save button is wired to normal saveTransaction
   document.getElementById('modal-save-btn').onclick = saveTransaction;
+  // Recurring switch is only for new entries — hide it when editing
+  document.querySelector('.recurring-toggle-row').style.display='none';
+  document.getElementById('f-recurring').checked=false;
+  document.getElementById('fg-recurring-opts').style.display='none';
   document.getElementById('modal-title-text').textContent='Edit Transaction';
   document.getElementById('f-date').value=t.date;
   setFieldValue('f-type', t.type);
@@ -3069,6 +3086,9 @@ function openModal() {
   document.getElementById('f-recur-day').value='';
   document.getElementById('f-recurring').checked=false;
   document.getElementById('fg-recurring-opts').style.display='none';
+  // Show recurring switch and "Start from" options (may be hidden by an edit or a cancelled template edit)
+  document.querySelector('.recurring-toggle-row').style.display='';
+  document.getElementById('recur-start-today').closest('div').parentElement.style.display='';
   setFieldValue('f-freq','Monthly');
   document.getElementById('recur-start-today').checked=true;
   setFieldValue('f-trip','No trip');
@@ -3254,10 +3274,25 @@ function saveTransaction() {
   const notes=document.getElementById('f-notes').value.trim();
   if(!date){alert('Please enter a date.');return;}
 
+  // Snapshot so a failed validation can put everything back (keeps the original when editing)
+  const wasEditing = editingId!==null;
+  const snap = {txns:data.transactions.slice(), nextId:data.nextId, editingId};
+  const abortSave = () => { data.transactions=snap.txns; data.nextId=snap.nextId; editingId=snap.editingId; };
+
   if(editingId!==null){
     const old=data.transactions.find(x=>x.id===editingId);
     if(old&&old.type==='Loan Repayment'){
-      data.transactions=data.transactions.filter(x=>!(x.type==='Expense'&&x.desc&&x.desc.startsWith('Loan interest')&&x.date===old.date&&x.account===old.account));
+      // Remove only this repayment's own interest entry (same date, account and interest amount)
+      const isInterestCandidate = x => x.type==='Expense'&&x.desc&&x.desc.startsWith('Loan interest')&&x.date===old.date&&x.account===old.account;
+      let match = null;
+      if(old.cashOut!=null){
+        const oldInterest = Math.max(0, old.cashOut-Math.abs(old.amount||0));
+        if(oldInterest>0) match = data.transactions.find(x=>isInterestCandidate(x)&&Math.abs(Math.abs(x.amount)-oldInterest)<0.005);
+      } else {
+        const candidates = data.transactions.filter(isInterestCandidate);
+        if(candidates.length===1) match = candidates[0];
+      }
+      if(match) data.transactions=data.transactions.filter(x=>x!==match);
     }
     data.transactions=data.transactions.filter(x=>x.id!==editingId);
     editingId=null;
@@ -3273,14 +3308,14 @@ function saveTransaction() {
     txn.cat=getFieldValue('f-cat');
     txn.sub=getFieldValue('f-sub');
     const rawAmt=parseFloat(document.getElementById('f-amount').value);
-    if(isNaN(rawAmt)){alert('Please enter a valid amount.');data.nextId--;return;}
+    if(isNaN(rawAmt)){alert('Please enter a valid amount.');abortSave();return;}
 
     if(INV_NEUTRAL_SUBS.includes(txn.sub)){
       // Fund Account / Withdraw — moves real money between two accounts, like a Transfer
       const fromAcc=getFieldValue('f-from-account');
       const toAcc=getFieldValue('f-to-account');
-      if(!fromAcc||!toAcc){alert('Please select both accounts.');data.nextId--;return;}
-      if(rawAmt<=0){alert('Please enter a positive amount.');data.nextId--;return;}
+      if(!fromAcc||!toAcc){alert('Please select both accounts.');abortSave();return;}
+      if(rawAmt<=0){alert('Please enter a positive amount.');abortSave();return;}
       txn.account=fromAcc;
       txn.toAccount=toAcc;
       txn.amount=Math.abs(rawAmt); // sign handled by transfer-style balance logic, not +/-
@@ -3295,32 +3330,32 @@ function saveTransaction() {
     txn.sub=getFieldValue('f-sub');
     txn.account=getFieldValue('f-account');
     const rawAmt=parseFloat(document.getElementById('f-amount').value);
-    if(isNaN(rawAmt)){alert('Please enter a valid amount.');data.nextId--;return;}
+    if(isNaN(rawAmt)){alert('Please enter a valid amount.');abortSave();return;}
     txn.amount = type==='Expense' ? -Math.abs(rawAmt) : Math.abs(rawAmt);
 
   } else if(type==='Opening Balance'){
     txn.account=getFieldValue('f-account');
     const rawAmt=parseFloat(document.getElementById('f-amount').value);
-    if(isNaN(rawAmt)){alert('Please enter a valid amount.');data.nextId--;return;}
+    if(isNaN(rawAmt)){alert('Please enter a valid amount.');abortSave();return;}
     txn.amount=signState==='negative'?-Math.abs(rawAmt):Math.abs(rawAmt);
 
   } else if(type==='Transfer'){
     const amt=parseFloat(document.getElementById('f-amount').value);
-    if(isNaN(amt)||amt<=0){alert('Please enter a positive transfer amount.');data.nextId--;return;}
+    if(isNaN(amt)||amt<=0){alert('Please enter a positive transfer amount.');abortSave();return;}
     txn.account=getFieldValue('f-from-account');
     txn.toAccount=getFieldValue('f-to-account');
     txn.amount=amt;
 
   } else if(type==='Asset Purchase'){
     const amt=parseFloat(document.getElementById('f-amount').value);
-    if(isNaN(amt)||amt<=0){alert('Please enter a positive amount.');data.nextId--;return;}
+    if(isNaN(amt)||amt<=0){alert('Please enter a positive amount.');abortSave();return;}
     txn.account=getFieldValue('f-purch-from');
     txn.toAccount=getFieldValue('f-asset-account');
     txn.amount=amt;
 
   } else if(type==='Loan / Liability'){
     const amt=parseFloat(document.getElementById('f-amount').value);
-    if(isNaN(amt)||amt<=0){alert('Please enter a positive loan amount.');data.nextId--;return;}
+    if(isNaN(amt)||amt<=0){alert('Please enter a positive loan amount.');abortSave();return;}
     txn.account=getFieldValue('f-loan-deposit');
     txn.toAccount=getFieldValue('f-liab-account');
     txn.amount=amt;
@@ -3328,7 +3363,7 @@ function saveTransaction() {
   } else if(type==='Loan Repayment'){
     const principal=parseFloat(document.getElementById('f-rep-principal').value)||0;
     const interest=parseFloat(document.getElementById('f-rep-interest').value)||0;
-    if(principal<=0&&interest<=0){alert('Please enter principal and/or interest.');data.nextId--;return;}
+    if(principal<=0&&interest<=0){alert('Please enter principal and/or interest.');abortSave();return;}
     const fromAcc=getFieldValue('f-rep-from');
     const liabAcc=getFieldValue('f-rep-liab');
     txn.account=fromAcc; txn.toAccount=liabAcc;
@@ -3342,7 +3377,7 @@ function saveTransaction() {
   } else if(type==='Asset Revaluation'){
     const assetAcc=getFieldValue('f-reval-account');
     const newVal=parseFloat(document.getElementById('f-newvalue').value);
-    if(isNaN(newVal)){alert('Please enter a new value.');data.nextId--;return;}
+    if(isNaN(newVal)){alert('Please enter a new value.');abortSave();return;}
     const bal=calcAccountBalances();
     txn.account=assetAcc;
     txn.amount=newVal-(bal[assetAcc]||0);
@@ -3353,7 +3388,7 @@ function saveTransaction() {
   const isRecurringChecked = document.getElementById('f-recurring').checked;
   const recurStartNext = isRecurringChecked && document.getElementById('recur-start-next') && document.getElementById('recur-start-next').checked;
 
-  if(isRecurringChecked && editingId===null) {
+  if(isRecurringChecked && !wasEditing) {
     const freq = getFieldValue('f-freq')||'Monthly';
     const day = parseInt(document.getElementById('f-recur-day').value)||1;
     const now = new Date();
@@ -3378,10 +3413,13 @@ function saveTransaction() {
     } else {
       // "Record today" — add instance now AND save template
       txn.isRecurring = true;
+      const templateId = Date.now();
+      const templateTxn = {...txn, id:undefined};
+      txn.recurringId = templateId; // link entry to its template
       data.transactions.push(txn);
       data.recurringTransactions.push({
-        id: Date.now(),
-        templateTxn: {...txn, id:undefined},
+        id: templateId,
+        templateTxn,
         frequency: freq.toLowerCase(),
         day,
         lastAdded
@@ -3542,7 +3580,8 @@ function processRecurringTransactions() {
         ...r.templateTxn,
         id: data.nextId++,
         date: `${currentYear}-${String(currentMonth+1).padStart(2,'0')}-${String(Math.min(r.day||1,28)).padStart(2,'0')}`,
-        isRecurring: true
+        isRecurring: true,
+        recurringId: r.id // link entry to its template
       };
       data.transactions.push(newTxn);
       r.lastAdded = monthKey;
