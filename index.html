@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!--
-  NET WORTH — Personal Finance PWA v2.7
+  NET WORTH — Personal Finance PWA v2.8
   ======================================
   HOW TO DEPLOY TO IPHONE:
   1. Upload index.html + Net_Worth_App_Logo.png to GitHub Pages repo
@@ -408,7 +408,7 @@
       <div class="chart-container"><canvas id="chart-nw-trend"></canvas></div>
       <div id="nw-trend-legend" style="display:flex;gap:16px;margin-top:10px;flex-wrap:wrap;"></div>
     </div>
-    <div style="text-align:center;padding:20px 16px 8px;font-size:12px;color:#94A3B8;letter-spacing:0.3px;"><strong style="color:#B0B8C4;">Net Worth</strong> v2.7 · by Suski</div>
+    <div style="text-align:center;padding:20px 16px 8px;font-size:12px;color:#94A3B8;letter-spacing:0.3px;"><strong style="color:#B0B8C4;">Net Worth</strong> v2.8 · by Suski</div>
     <div class="section-spacer"></div>
   </div>
 
@@ -715,9 +715,17 @@
           <div class="form-label">Frequency</div>
           <div class="picker-field" id="f-freq-field" data-picker-target="f-freq"><span class="picker-value" id="f-freq-label">Monthly</span><i class="ti ti-chevron-down picker-chevron"></i></div>
         </div>
-        <div class="form-group">
-          <div class="form-label">Day of month</div>
+        <div class="form-group" id="fg-recur-month" style="display:none;">
+          <div class="form-label">Month</div>
+          <div class="picker-field" id="f-month-field" data-picker-target="f-month"><span class="picker-value" id="f-month-label">January</span><i class="ti ti-chevron-down picker-chevron"></i></div>
+        </div>
+        <div class="form-group" id="fg-recur-day">
+          <div class="form-label" id="f-recur-day-label">Day of month</div>
           <input type="number" class="form-control" id="f-recur-day" min="1" max="31" placeholder="e.g. 27" inputmode="numeric">
+        </div>
+        <div class="form-group" id="fg-recur-weekday" style="display:none;">
+          <div class="form-label">Weekday</div>
+          <div class="picker-field" id="f-weekday-field" data-picker-target="f-weekday"><span class="picker-value" id="f-weekday-label">Monday</span><i class="ti ti-chevron-down picker-chevron"></i></div>
         </div>
       </div>
       <div style="margin-top:12px;">
@@ -786,7 +794,7 @@ const SUPABASE_URL = 'https://vaizzdeogxqbpyffacth.supabase.co';
 const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZhaXp6ZGVvZ3hxYnB5ZmZhY3RoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIxOTYyNTUsImV4cCI6MjA5Nzc3MjI1NX0.6LZt00DmWjE26ZUySYpoeaajrwqgeoxgB2tP0ZLkdlI';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
 
-const APP_VERSION = '2.7';
+const APP_VERSION = '2.8';
 
 /* --- cache-busting: force reload if cached version differs --- */
 (function checkVersion() {
@@ -820,63 +828,201 @@ function hideSync() {
   el.classList.add('hidden');
 }
 
+/* --- sync state: stored on this device only, never uploaded (v2.8) --- */
+const SYNC_UNSYNCED_KEY = 'nw_unsynced_uid';     // account whose changes on this device are not yet in the cloud
+const SYNC_LOCAL_TS_KEY = 'nw_local_changed_at'; // when this device last changed data
+const SYNC_CLOUD_TS_KEY = 'nw_cloud_ts';         // "uid|updated_at" of the cloud copy this device last saw
+const BACKUP_KEY = 'finanza_v1_backup';          // the version not kept after a sync clash
+let syncInFlight = false, syncQueued = false, conflictOpen = false, launchedOffline = false;
+
+function hasUnsynced() { return !!currentUser && localStorage.getItem(SYNC_UNSYNCED_KEY) === currentUser.id; }
+function markUnsynced() {
+  if (!currentUser) return;
+  localStorage.setItem(SYNC_UNSYNCED_KEY, currentUser.id);
+  localStorage.setItem(SYNC_LOCAL_TS_KEY, new Date().toISOString());
+}
+function getKnownCloudTs() {
+  const v = localStorage.getItem(SYNC_CLOUD_TS_KEY) || '';
+  const i = v.indexOf('|');
+  return (currentUser && i > 0 && v.slice(0, i) === currentUser.id) ? v.slice(i + 1) : null;
+}
+function setKnownCloudTs(ts) { if (currentUser && ts) localStorage.setItem(SYNC_CLOUD_TS_KEY, currentUser.id + '|' + ts); }
+function tsMs(t) { return Date.parse(String(t).replace(' ', 'T').replace(/(\.\d{3})\d+/, '$1')); } // ms precision, Safari-safe
+function sameTs(a, b) { if (!a || !b) return false; const x = tsMs(a), y = tsMs(b); return !isNaN(x) && x === y; }
+function saveBackup(source, d) {
+  try { localStorage.setItem(BACKUP_KEY, JSON.stringify({ savedAt: new Date().toISOString(), source, data: d })); }
+  catch (e) { console.error('Backup failed:', e); }
+}
+
 /* --- push data to Supabase (debounced 1.5s) --- */
 function scheduleSyncToCloud() {
   if (!currentUser) return;
   clearTimeout(syncTimeout);
   syncTimeout = setTimeout(syncToCloud, 1500);
 }
+// send pending changes right away (leaving the app, connection back)
+function flushSync() {
+  if (!currentUser || !hasUnsynced()) return;
+  clearTimeout(syncTimeout);
+  syncToCloud();
+}
+
+async function fetchCloudRow(cols) {
+  const { data: rows, error } = await sb.from('user_data').select(cols).eq('id', currentUser.id);
+  if (error) throw error;
+  return (rows && rows[0]) || null;
+}
 
 async function syncToCloud() {
-  if (!currentUser) return;
+  if (!currentUser || conflictOpen) return;
+  if (syncInFlight) { syncQueued = true; return; }
+  syncInFlight = true;
   showSync('↑ Syncing…');
+  const startedLocalTs = localStorage.getItem(SYNC_LOCAL_TS_KEY);
   try {
-    const { error } = await sb.from('user_data').upsert({
-      id: currentUser.id,
-      data: data,
-      updated_at: new Date().toISOString()
-    }, { onConflict: 'id' });
+    // 1) Did the cloud change since this device last saw it (another device / earlier offline session)?
+    const head = await fetchCloudRow('updated_at');
+    if (head && !sameTs(head.updated_at, getKnownCloudTs())) {
+      const full = await fetchCloudRow('data,updated_at');
+      syncInFlight = false;
+      await resolveSyncConflict(full);
+      return;
+    }
+    // 2) Upload this device's copy
+    const ts = new Date().toISOString();
+    const { error } = await sb.from('user_data').upsert({ id: currentUser.id, data: data, updated_at: ts }, { onConflict: 'id' });
     if (error) throw error;
+    setKnownCloudTs(ts);
+    if (localStorage.getItem(SYNC_LOCAL_TS_KEY) === startedLocalTs) localStorage.removeItem(SYNC_UNSYNCED_KEY);
+    else syncQueued = true; // changed again while uploading
+    launchedOffline = false;
     showSync('✓ Saved');
-    setTimeout(hideSync, 2000);
-  } catch(e) {
-    showSync('⚠ Sync failed');
-    setTimeout(hideSync, 3000);
+    setTimeout(() => { if (!hasUnsynced() && !conflictOpen) hideSync(); }, 2000);
+  } catch (e) {
+    showSync('⚠ Not synced'); // stays visible until an upload succeeds
     console.error('Sync error:', e);
+  } finally {
+    syncInFlight = false;
+    if (syncQueued) { syncQueued = false; scheduleSyncToCloud(); }
   }
 }
 
-/* --- pull data from Supabase --- */
-async function loadFromCloud() {
-  if (!currentUser) return false;
-  try {
-    const { data: rows, error } = await sb.from('user_data').select('data').eq('id', currentUser.id).single();
-    if (error && error.code !== 'PGRST116') throw error; // PGRST116 = no rows, that's fine
-    if (rows && rows.data) {
-      data = rows.data;
-      // run same migrations as loadData()
-      if (!data.subcategories) data.subcategories = {};
-      if (!data.bsMapping) data.bsMapping = {};
-      if (!data.categoryColors) data.categoryColors = {};
-      if (!data.subcategoryColors) data.subcategoryColors = {};
-      if (!data.budgets) data.budgets = {};
-      if (!data.recurringTransactions) data.recurringTransactions = [];
-      if (!data.trips) data.trips = [];
-      if (!data.subcategories['Investments']) data.subcategories['Investments'] = [];
-      const reqSubs=['Fund Account','Withdraw','Dividends','Capital Gain','Capital Loss','Interest'];
-      reqSubs.forEach(s=>{if(!data.subcategories['Investments'].includes(s)) data.subcategories['Investments'].push(s);});
-      const palette=['#4A9BDB','#639922','#E24B4A','#7C3AED','#D97706','#DB2777','#059669','#0891B2','#F59E0B','#8B5CF6'];
-      data.accounts.forEach((a,i)=>{if(!a.color) a.color=palette[i%palette.length];});
-      // save to localStorage as cache
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-      return true;
-    }
-    return false;
-  } catch(e) {
-    console.error('Load from cloud error:', e);
-    return false;
-  }
+/* --- both this device and the cloud changed: ask which version to keep --- */
+function resolveSyncConflict(cloudRow, opts = {}) {
+  return new Promise(resolve => {
+    conflictOpen = true;
+    hideSplash();
+    const cloudData = (cloudRow && cloudRow.data) || {};
+    const when = iso => iso ? new Date(iso).toLocaleString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : 'unknown';
+    const localCount = (data.transactions || []).length;
+    const cloudCount = (cloudData.transactions || []).length;
+    const old = document.getElementById('sync-conflict-prompt');
+    if (old) old.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'sync-conflict-prompt';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9999;display:flex;align-items:flex-end;';
+    overlay.innerHTML = `
+      <div style="background:#fff;width:100%;border-radius:16px 16px 0 0;padding:20px 16px calc(32px + env(safe-area-inset-bottom));">
+        <div style="font-weight:700;font-size:16px;color:var(--navy);margin-bottom:6px;">Two different versions of your data</div>
+        <div style="font-size:14px;color:#64748B;margin-bottom:20px;">This device has changes that never reached the cloud, and the cloud copy was also changed (for example from another device). Choose which version to keep. The other one is saved as a backup on this device.</div>
+        <button id="sync-keep-device" style="display:block;width:100%;padding:14px;background:var(--navy);color:#fff;border:none;border-radius:10px;font-size:15px;font-weight:600;margin-bottom:10px;cursor:pointer;">Keep this device<div style="font-size:12px;font-weight:400;opacity:0.8;margin-top:2px;">${localCount} entries · last change ${when(localStorage.getItem(SYNC_LOCAL_TS_KEY))}</div></button>
+        <button id="sync-keep-cloud" style="display:block;width:100%;padding:14px;background:transparent;color:var(--navy);border:2px solid var(--navy);border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;">Keep cloud<div style="font-size:12px;font-weight:400;opacity:0.8;margin-top:2px;">${cloudCount} entries · last change ${when(cloudRow && cloudRow.updated_at)}</div></button>
+      </div>`;
+    document.body.appendChild(overlay);
+
+    document.getElementById('sync-keep-device').onclick = () => {
+      overlay.remove();
+      saveBackup('cloud', cloudData);
+      setKnownCloudTs(cloudRow.updated_at); // accept that we are replacing this cloud version
+      conflictOpen = false;
+      syncToCloud();
+      resolve('device');
+    };
+    document.getElementById('sync-keep-cloud').onclick = () => {
+      overlay.remove();
+      saveBackup('device', data);
+      applyCloudRow(cloudRow);
+      localStorage.removeItem(SYNC_UNSYNCED_KEY);
+      conflictOpen = false;
+      hideSync();
+      if (!opts.startup) { processRecurringTransactions(); renderTab(currentTab); }
+      resolve('cloud');
+    };
+  });
 }
+
+/* --- use a row downloaded from Supabase as this device's data --- */
+function applyCloudRow(row) {
+  data = row.data;
+  // run same migrations as loadData()
+  if (!data.subcategories) data.subcategories = {};
+  if (!data.bsMapping) data.bsMapping = {};
+  if (!data.categoryColors) data.categoryColors = {};
+  if (!data.subcategoryColors) data.subcategoryColors = {};
+  if (!data.budgets) data.budgets = {};
+  if (!data.recurringTransactions) data.recurringTransactions = [];
+  if (!data.trips) data.trips = [];
+  if (!data.subcategories['Investments']) data.subcategories['Investments'] = [];
+  const reqSubs=['Fund Account','Withdraw','Dividends','Capital Gain','Capital Loss','Interest'];
+  reqSubs.forEach(s=>{if(!data.subcategories['Investments'].includes(s)) data.subcategories['Investments'].push(s);});
+  const palette=['#4A9BDB','#639922','#E24B4A','#7C3AED','#D97706','#DB2777','#059669','#0891B2','#F59E0B','#8B5CF6'];
+  data.accounts.forEach((a,i)=>{if(!a.color) a.color=palette[i%palette.length];});
+  // save to localStorage as cache
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  setKnownCloudTs(row.updated_at);
+}
+
+/* --- startup: choose between the cloud copy and this device's copy ---
+   returns 'cloud' | 'device' | 'empty' (no cloud data yet) | 'offline' (cloud unreachable, using this device) */
+async function loadFromCloud() {
+  if (!currentUser) return 'offline';
+  let row;
+  try {
+    row = await fetchCloudRow('data,updated_at');
+  } catch (e) {
+    console.error('Load from cloud error:', e);
+    loadData();
+    launchedOffline = true;
+    showSync(hasUnsynced() ? '⚠ Not synced' : '⚠ Offline');
+    return 'offline';
+  }
+  if (!row || !row.data) return 'empty';
+
+  if (hasUnsynced()) {
+    loadData(); // this device holds changes the cloud doesn't have
+    if (sameTs(row.updated_at, getKnownCloudTs())) { flushSync(); return 'device'; } // cloud unchanged → just upload
+    return await resolveSyncConflict(row, { startup: true });
+  }
+  // unsynced changes from a different account on this device: keep a backup before replacing them
+  if (localStorage.getItem(SYNC_UNSYNCED_KEY)) {
+    try { saveBackup('device', JSON.parse(localStorage.getItem(STORAGE_KEY))); } catch (e) {}
+    localStorage.removeItem(SYNC_UNSYNCED_KEY);
+  }
+  applyCloudRow(row);
+  return 'cloud';
+}
+
+/* --- retry when the connection comes back or the app is reopened --- */
+async function retrySync() {
+  if (!currentUser || conflictOpen) return;
+  if (hasUnsynced()) { flushSync(); return; }
+  if (!launchedOffline) return;
+  // started offline with nothing pending: fetch the latest cloud copy
+  try {
+    const row = await fetchCloudRow('data,updated_at');
+    if (!row || !row.data || hasUnsynced()) return;
+    applyCloudRow(row);
+    launchedOffline = false;
+    hideSync();
+    processRecurringTransactions();
+    renderTab(currentTab);
+  } catch (e) { /* still offline */ }
+}
+window.addEventListener('online', retrySync);
+window.addEventListener('pagehide', flushSync);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') flushSync(); else retrySync();
+});
 
 /* --- AUTH SCREEN LOGIC --- */
 let authMode = 'login'; // 'login' | 'signup'
@@ -988,9 +1134,9 @@ async function onSignedIn(user) {
 
   // check if there's existing localStorage data to migrate
   const localRaw = localStorage.getItem(STORAGE_KEY);
-  const cloudLoaded = await loadFromCloud();
+  const cloudState = await loadFromCloud();
 
-  if (!cloudLoaded && localRaw) {
+  if (cloudState === 'empty' && localRaw) {
     // user has local data but no cloud data — offer migration
     const migrate = confirm('We found existing data on this device. Import it to your account?');
     if (migrate) {
@@ -999,10 +1145,10 @@ async function onSignedIn(user) {
     } else {
       loadData(); // use defaults / empty
     }
-  } else if (!cloudLoaded) {
+  } else if (cloudState === 'empty') {
     loadData(); // fresh start
   }
-  // else cloudLoaded = true, data already set from cloud
+  // otherwise data is already set (cloud copy, this device's copy, or offline cache)
 
   hideAuthScreen();
   processRecurringTransactions();
@@ -1013,10 +1159,18 @@ async function onSignedIn(user) {
 
 /* --- sign out --- */
 async function signOut() {
+  // try to upload pending changes first — signing out deletes this device's copy
+  if (hasUnsynced()) {
+    clearTimeout(syncTimeout);
+    await syncToCloud();
+    if (conflictOpen) return;
+    if (hasUnsynced() && !confirm('Some changes have not reached the cloud yet. Signing out will delete them from this device. Sign out anyway?')) return;
+  }
   await sb.auth.signOut();
   currentUser = null;
   // clear local cache
   localStorage.removeItem(STORAGE_KEY);
+  localStorage.removeItem(SYNC_UNSYNCED_KEY);
   data = {};
   showAuthScreen();
   document.getElementById('auth-email').value = '';
@@ -1029,8 +1183,8 @@ async function initAuth() {
   const { data: { session } } = await sb.auth.getSession();
   if (session && session.user) {
     currentUser = session.user;
-    const cloudLoaded = await loadFromCloud();
-    if (!cloudLoaded) loadData();
+    const cloudState = await loadFromCloud();
+    if (cloudState === 'empty') loadData();
     hideAuthScreen();
     processRecurringTransactions();
     setupModalPickers();
@@ -1135,6 +1289,7 @@ function loadData() {
 }
 function saveData() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+  markUnsynced(); // cleared once the upload succeeds
   scheduleSyncToCloud();
 }
 
@@ -1144,7 +1299,7 @@ function saveData() {
 const fmt = new Intl.NumberFormat('it-IT', {style:'currency', currency:'EUR'});
 const fmtAmt = v => fmt.format(v);
 function amtClass(v) { return v>0?'amount-pos':v<0?'amount-neg':'amount-neu'; }
-function todayISO() { return new Date().toISOString().slice(0,10); }
+function todayISO() { const d=new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; } // local date, not UTC
 function parseDate(iso) { return new Date(iso+'T00:00:00'); }
 function currentYear() { return new Date().getFullYear(); }
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -1676,7 +1831,7 @@ function calcHistoricalNW(months) {
   months.forEach(({year, month}) => {
     // cutoff = last moment of that month
     const cutoff = new Date(year, month+1, 0, 23, 59, 59);
-    const cutoffStr = cutoff.toISOString().slice(0,10);
+    const cutoffStr = `${cutoff.getFullYear()}-${String(cutoff.getMonth()+1).padStart(2,'0')}-${String(cutoff.getDate()).padStart(2,'0')}`; // local date
 
     const tempBal = {};
     data.accounts.forEach(a => { tempBal[a.name] = 0; });
@@ -2668,7 +2823,7 @@ function renderSettingsData() {
       <div class="settings-item">
         <div style="flex:1;min-width:0;">
           <div class="settings-item-name">${r.templateTxn.desc||r.templateTxn.type}</div>
-          <div class="settings-item-sub">${r.frequency} · day ${r.day} · ${fmtAmt(Math.abs(parseFloat(r.templateTxn.amount)||0))}</div>
+          <div class="settings-item-sub">${recurScheduleLabel(r)} · ${fmtAmt(Math.abs(parseFloat(r.templateTxn.amount)||0))}</div>
         </div>
         <div style="display:flex;gap:4px;">
           <button class="icon-btn" data-edit-recur-data="${i}" title="Edit template"><i class="ti ti-pencil"></i></button>
@@ -2755,8 +2910,7 @@ function openEditTemplateById(templateId) {
   document.querySelector('.recurring-toggle-row').style.display='';
   document.getElementById('f-recurring').checked = true;
   document.getElementById('fg-recurring-opts').style.display = '';
-  setFieldValue('f-freq', template.frequency.charAt(0).toUpperCase()+template.frequency.slice(1));
-  document.getElementById('f-recur-day').value = template.day;
+  fillRecurSchedule(template);
 
   // Hide start-from options
   const startFromEl = document.getElementById('recur-start-today');
@@ -2871,8 +3025,7 @@ function openEditTemplate(txnId) {
   document.querySelector('.recurring-toggle-row').style.display='';
   document.getElementById('f-recurring').checked = true;
   document.getElementById('fg-recurring-opts').style.display = '';
-  setFieldValue('f-freq', template.frequency.charAt(0).toUpperCase()+template.frequency.slice(1));
-  document.getElementById('f-recur-day').value = template.day;
+  fillRecurSchedule(template);
 
   // Hide start-from options (not relevant when editing template)
   document.getElementById('recur-start-today').closest('div').parentElement.style.display = 'none';
@@ -2888,8 +3041,7 @@ function saveTemplateEdit() {
   if(templateIdx<0){ alert('Template not found.'); return; }
   const template = data.recurringTransactions[templateIdx];
 
-  const freq = getFieldValue('f-freq')||'Monthly';
-  const day = parseInt(document.getElementById('f-recur-day').value)||1;
+  const sched = readRecurSchedule();
 
   // Update template fields
   const txn = template.templateTxn;
@@ -2907,8 +3059,15 @@ function saveTemplateEdit() {
   if(txn.sub !== undefined) txn.sub = getFieldValue('f-sub');
   txn.account = getFieldValue('f-account')||txn.account;
 
-  template.frequency = freq.toLowerCase();
-  template.day = day;
+  const freqChanged = sched.frequency !== (template.frequency||'monthly');
+  template.frequency = sched.frequency;
+  template.day = sched.day;
+  if(sched.frequency==='weekly') template.weekday = sched.weekday; else delete template.weekday;
+  if(sched.frequency==='yearly') template.month = sched.month; else delete template.month;
+  // Move lastDate onto the new schedule without re-firing the period already handled
+  const ref = (!freqChanged && template.lastDate) ? parseDate(template.lastDate) : new Date();
+  template.lastDate = ymd(occurrenceInPeriod(template, ref));
+  template.lastAdded = template.lastDate.slice(0,7);
 
   // Restore start-from options visibility and save btn
   const startFromDiv = document.getElementById('recur-start-today');
@@ -3090,6 +3249,9 @@ function openModal() {
   document.querySelector('.recurring-toggle-row').style.display='';
   document.getElementById('recur-start-today').closest('div').parentElement.style.display='';
   setFieldValue('f-freq','Monthly');
+  setFieldValue('f-weekday', WEEKDAY_NAMES[(new Date().getDay()+6)%7]);
+  setFieldValue('f-month', MONTH_NAMES[new Date().getMonth()]);
+  updateRecurFields();
   document.getElementById('recur-start-today').checked=true;
   setFieldValue('f-trip','No trip');
   // show trip field only if at least one trip exists
@@ -3100,6 +3262,30 @@ function openModal() {
 function closeModal() {
   document.getElementById('modal-overlay').classList.remove('open');
   editingId=null;
+}
+/* --- recurring schedule fields (v2.8) --- */
+function updateRecurFields() {
+  const f = (getFieldValue('f-freq')||'Monthly').toLowerCase();
+  document.getElementById('fg-recur-day').style.display = f==='weekly' ? 'none' : '';
+  document.getElementById('fg-recur-weekday').style.display = f==='weekly' ? '' : 'none';
+  document.getElementById('fg-recur-month').style.display = f==='yearly' ? '' : 'none';
+  document.getElementById('f-recur-day-label').textContent = f==='yearly' ? 'Day' : 'Day of month';
+}
+function readRecurSchedule() {
+  const frequency = (getFieldValue('f-freq')||'Monthly').toLowerCase();
+  const s = { frequency, day: parseInt(document.getElementById('f-recur-day').value)||1 };
+  if(frequency==='weekly') s.weekday = Math.max(0, WEEKDAY_NAMES.indexOf(getFieldValue('f-weekday')));
+  if(frequency==='yearly') s.month = Math.max(0, MONTH_NAMES.indexOf(getFieldValue('f-month'))) + 1;
+  return s;
+}
+function fillRecurSchedule(r) {
+  const f = r.frequency || 'monthly';
+  const now = new Date();
+  setFieldValue('f-freq', f.charAt(0).toUpperCase()+f.slice(1));
+  document.getElementById('f-recur-day').value = r.day || '';
+  setFieldValue('f-weekday', WEEKDAY_NAMES[r.weekday!=null ? r.weekday : (now.getDay()+6)%7]);
+  setFieldValue('f-month', MONTH_NAMES[r.month ? r.month-1 : now.getMonth()]);
+  updateRecurFields();
 }
 // recurring toggle
 document.getElementById('f-recurring').addEventListener('change', function() {
@@ -3139,7 +3325,9 @@ function setupModalPickers() {
   bindPickerField('f-rep-from', ()=>cashAccountNames(), 'Pay From');
   bindPickerField('f-rep-liab', ()=>liabAccountNames(), 'Liability Account');
   bindPickerField('f-reval-account', ()=>assetAccountNames(), 'Asset Account');
-  bindPickerField('f-freq', ()=>['Weekly','Monthly','Yearly'], 'Repeat Frequency', { search:false });
+  bindPickerField('f-freq', ()=>['Weekly','Monthly','Yearly'], 'Repeat Frequency', { search:false, onSelect: updateRecurFields });
+  bindPickerField('f-weekday', ()=>WEEKDAY_NAMES, 'Weekday', { search:false });
+  bindPickerField('f-month', ()=>MONTH_NAMES, 'Month', { search:false });
   bindPickerField('f-trip', ()=>['No trip',...(data.trips||[]).map(t=>t.name)], 'Tag a Trip', { search:false });
 }
 
@@ -3389,10 +3577,10 @@ function saveTransaction() {
   const recurStartNext = isRecurringChecked && document.getElementById('recur-start-next') && document.getElementById('recur-start-next').checked;
 
   if(isRecurringChecked && !wasEditing) {
-    const freq = getFieldValue('f-freq')||'Monthly';
-    const day = parseInt(document.getElementById('f-recur-day').value)||1;
+    const schedule = readRecurSchedule(); // {frequency, day, weekday?, month?}
     const now = new Date();
     const lastAdded = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+    const lastDate = ymd(occurrenceInPeriod(schedule, now)); // current period counts as done
     if(!data.recurringTransactions) data.recurringTransactions=[];
 
     if(recurStartNext) {
@@ -3401,9 +3589,9 @@ function saveTransaction() {
       data.recurringTransactions.push({
         id: Date.now(),
         templateTxn: {...txn, id:undefined},
-        frequency: freq.toLowerCase(),
-        day,
-        lastAdded
+        ...schedule,
+        lastAdded,
+        lastDate
       });
       // skip adding the transaction itself
       document.getElementById('f-recurring').checked = false;
@@ -3420,9 +3608,9 @@ function saveTransaction() {
       data.recurringTransactions.push({
         id: templateId,
         templateTxn,
-        frequency: freq.toLowerCase(),
-        day,
-        lastAdded
+        ...schedule,
+        lastAdded,
+        lastDate
       });
     }
   } else {
@@ -3540,51 +3728,88 @@ document.getElementById('account-sheet-signout').addEventListener('click',()=>{
 /* ============================================================
    RECURRING TRANSACTIONS — fire on app open
    ============================================================ */
+const WEEKDAY_NAMES = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday']; // weekday index 0 = Monday
+const MONTH_NAMES = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+/* --- recurring schedule helpers (v2.8) --- */
+function ymd(d) { return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`; }
+function daysInMonth(y, m0) { return new Date(y, m0+1, 0).getDate(); }
+function clampDay(y, m0, day) { return Math.min(Math.max(parseInt(day)||1,1), daysInMonth(y, m0)); }
+// The scheduled date of template r within the period (week / month / year) that contains date d
+function occurrenceInPeriod(r, d) {
+  const f = r.frequency || 'monthly';
+  if(f === 'weekly') {
+    const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+    const monIdx = (x.getDay()+6)%7;              // 0 = Monday
+    x.setDate(x.getDate() - monIdx + (r.weekday||0));
+    return x;
+  }
+  if(f === 'yearly') {
+    const m0 = (r.month||1) - 1, y = d.getFullYear();
+    return new Date(y, m0, clampDay(y, m0, r.day));
+  }
+  const y = d.getFullYear(), m0 = d.getMonth();
+  return new Date(y, m0, clampDay(y, m0, r.day));
+}
+// The scheduled date in the period after the one containing date d
+function nextOccurrence(r, d) {
+  const f = r.frequency || 'monthly';
+  if(f === 'weekly') { const x = occurrenceInPeriod(r, d); x.setDate(x.getDate()+7); return x; }
+  if(f === 'yearly') return occurrenceInPeriod(r, new Date(d.getFullYear()+1, 0, 1));
+  return occurrenceInPeriod(r, new Date(d.getFullYear(), d.getMonth()+1, 1));
+}
+function recurScheduleLabel(r) {
+  const f = r.frequency || 'monthly';
+  if(f === 'weekly') return `weekly · ${WEEKDAY_NAMES[r.weekday||0]}`;
+  if(f === 'yearly') return `yearly · ${r.day||1} ${MONTH_NAMES[(r.month||1)-1]}`;
+  return `monthly · day ${r.day||1}`;
+}
+// Migration v2.8: give older templates lastDate (+ month for yearly, weekday for weekly), derived from lastAdded
+function migrateRecurringTemplates() {
+  (data.recurringTransactions||[]).forEach(r => {
+    if(r.lastDate) return;
+    const f = r.frequency || 'monthly';
+    const today = new Date();
+    let ref = null; // a date inside the last period that was already handled
+    if(r.lastAdded && /^\d{4}-\d{2}$/.test(r.lastAdded)) {
+      const [y, m] = r.lastAdded.split('-').map(Number);
+      ref = new Date(y, m-1, clampDay(y, m-1, r.day));
+    }
+    if(f === 'yearly' && !r.month) r.month = ref ? ref.getMonth()+1 : today.getMonth()+1;
+    if(f === 'weekly' && r.weekday == null) r.weekday = ((ref||today).getDay()+6)%7;
+    if(!ref) {
+      // never fired: treat the previous period as done so the current one still fires (same as before)
+      if(f === 'weekly') ref = new Date(today.getFullYear(), today.getMonth(), today.getDate()-7);
+      else if(f === 'yearly') ref = new Date(today.getFullYear()-1, 0, 1);
+      else ref = new Date(today.getFullYear(), today.getMonth()-1, 1);
+    }
+    r.lastDate = ymd(occurrenceInPeriod(r, ref));
+  });
+}
+
 function processRecurringTransactions() {
   if(!data.recurringTransactions||!data.recurringTransactions.length) return;
+  migrateRecurringTemplates();
   const now = new Date();
-  const currentYear = now.getFullYear();
-  const currentMonth = now.getMonth(); // 0-based
-  const currentDay = now.getDate();
-  const monthKey = `${currentYear}-${String(currentMonth+1).padStart(2,'0')}`;
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   let added = false;
 
   data.recurringTransactions.forEach(r => {
-    // Check if already added this period
-    if(r.lastAdded === monthKey) return;
-
-    let shouldFire = false;
-    const freq = r.frequency || 'monthly';
-
-    if(freq === 'monthly') {
-      // fire if today >= the scheduled day this month
-      shouldFire = currentDay >= (r.day||1);
-    } else if(freq === 'weekly') {
-      // fire every 7 days — check if 7 days have passed since lastAdded
-      if(!r.lastAdded) { shouldFire = true; }
-      else {
-        const [ly, lm] = r.lastAdded.split('-').map(Number);
-        const lastDate = new Date(ly, lm-1, r.day||1);
-        const daysDiff = Math.floor((now - lastDate) / (1000*60*60*24));
-        shouldFire = daysDiff >= 7;
-      }
-    } else if(freq === 'yearly') {
-      // fire once per year — check year
-      const lastYear = r.lastAdded ? parseInt(r.lastAdded.split('-')[0]) : null;
-      shouldFire = (!lastYear || lastYear < currentYear) && currentDay >= (r.day||1);
-    }
-
-    if(shouldFire) {
-      // create new transaction from template
-      const newTxn = {
+    // Catch up every scheduled date after lastDate up to today (each entry gets its own date)
+    let next = nextOccurrence(r, parseDate(r.lastDate));
+    let guard = 0;
+    while(next <= today && guard < 500) {
+      data.transactions.push({
         ...r.templateTxn,
         id: data.nextId++,
-        date: `${currentYear}-${String(currentMonth+1).padStart(2,'0')}-${String(Math.min(r.day||1,28)).padStart(2,'0')}`,
+        date: ymd(next),
         isRecurring: true,
         recurringId: r.id // link entry to its template
-      };
-      data.transactions.push(newTxn);
-      r.lastAdded = monthKey;
+      });
+      r.lastDate = ymd(next);
+      r.lastAdded = r.lastDate.slice(0,7); // legacy field, kept up to date
+      next = nextOccurrence(r, next);
+      guard++;
       added = true;
     }
   });
