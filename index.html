@@ -1,6 +1,6 @@
 <!DOCTYPE html>
 <!--
-  NET WORTH — Personal Finance PWA v2.8
+  NET WORTH — Personal Finance PWA v2.9
   ======================================
   HOW TO DEPLOY TO IPHONE:
   1. Upload index.html + Net_Worth_App_Logo.png to GitHub Pages repo
@@ -408,7 +408,7 @@
       <div class="chart-container"><canvas id="chart-nw-trend"></canvas></div>
       <div id="nw-trend-legend" style="display:flex;gap:16px;margin-top:10px;flex-wrap:wrap;"></div>
     </div>
-    <div style="text-align:center;padding:20px 16px 8px;font-size:12px;color:#94A3B8;letter-spacing:0.3px;"><strong style="color:#B0B8C4;">Net Worth</strong> v2.8 · by Suski</div>
+    <div style="text-align:center;padding:20px 16px 8px;font-size:12px;color:#94A3B8;letter-spacing:0.3px;"><strong style="color:#B0B8C4;">Net Worth</strong> v2.9 · by Suski</div>
     <div class="section-spacer"></div>
   </div>
 
@@ -794,7 +794,7 @@ const SUPABASE_URL = 'https://vaizzdeogxqbpyffacth.supabase.co';
 const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZhaXp6ZGVvZ3hxYnB5ZmZhY3RoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIxOTYyNTUsImV4cCI6MjA5Nzc3MjI1NX0.6LZt00DmWjE26ZUySYpoeaajrwqgeoxgB2tP0ZLkdlI';
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON);
 
-const APP_VERSION = '2.8';
+const APP_VERSION = '2.9';
 
 /* --- cache-busting: force reload if cached version differs --- */
 (function checkVersion() {
@@ -1387,7 +1387,7 @@ function calcAccountBalances() {
         if(t.account) bal[t.account] = (bal[t.account]||0) + Math.abs(amt);
         if(t.toAccount) bal[t.toAccount] = (bal[t.toAccount]||0) - Math.abs(amt); break;
       case 'Loan Repayment':
-        const cashDeduct = t.cashOut!=null ? Math.abs(t.cashOut) : Math.abs(amt);
+        const cashDeduct = Math.abs(amt); // principal only — interest is deducted by its own 'Loan interest' Expense entry
         if(t.account) bal[t.account] = (bal[t.account]||0) - cashDeduct;
         if(t.toAccount) bal[t.toAccount] = (bal[t.toAccount]||0) + Math.abs(amt); break;
       case 'Asset Revaluation':
@@ -1614,8 +1614,9 @@ function renderDashboard() {
   netEl.className='pill-value '+(mNet>=0?'pos':'neg');
 
   const accEl=document.getElementById('dash-accounts');
-  const maxBal=Math.max(...data.accounts.map(a=>Math.abs(bal[a.name]||0)),1);
+  const maxBal=Math.max(...activeAccounts().map(a=>Math.abs(bal[a.name]||0)),1);
   accEl.innerHTML=data.accounts.map((a,i)=>{
+    if(a.archived) return ''; // archived: hidden here, still counted in Net Worth
     const b=bal[a.name]||0, pct=Math.min(100,Math.abs(b)/maxBal*100);
     return `<div class="account-row" data-acc-idx="${i}">
       <div class="drag-handle" title="Hold to reorder"><i class="ti ti-grip-vertical"></i></div>
@@ -1860,7 +1861,7 @@ function calcHistoricalNW(months) {
           if(t.account) tempBal[t.account] = (tempBal[t.account]||0) + Math.abs(amt);
           if(t.toAccount) tempBal[t.toAccount] = (tempBal[t.toAccount]||0) - Math.abs(amt); break;
         case 'Loan Repayment':
-          const cd = t.cashOut!=null?Math.abs(t.cashOut):Math.abs(amt);
+          const cd = Math.abs(amt); // principal only — interest has its own Expense entry
           if(t.account) tempBal[t.account] = (tempBal[t.account]||0) - cd;
           if(t.toAccount) tempBal[t.toAccount] = (tempBal[t.toAccount]||0) + Math.abs(amt); break;
         case 'Asset Revaluation':
@@ -1873,7 +1874,7 @@ function calcHistoricalNW(months) {
       const b = tempBal[a.name]||0;
       const cls = data.bsMapping[a.name]||'Cash';
       if(cls === 'Liability') liabilities += b; // negative
-      else assets += Math.max(0, b);
+      else assets += b; // negative asset balances (e.g. overdraft) reduce assets, like the Balance Sheet
     });
     const label = new Date(year, month).toLocaleDateString('en-GB',{month:'short',year:'2-digit'});
     results.push({ label, assets, liabilities, netWorth: assets + liabilities });
@@ -2580,7 +2581,7 @@ function renderCashFlow(period) {
   txns.filter(t=>t.type==='Expense').forEach(t=>{byCatOut[t.cat||'Other']=(byCatOut[t.cat||'Other']||0)+Math.abs(parseFloat(t.amount)||0);});
   const invLossTotal=txns.filter(t=>t.type==='Investment'&&invEffect(t)==='loss').reduce((s,t)=>s+Math.abs(parseFloat(t.amount)||0),0);
   const invFundTotal=txns.filter(t=>t.type==='Investment'&&t.sub==='Fund Account').reduce((s,t)=>s+Math.abs(parseFloat(t.amount)||0),0);
-  const repTotal=txns.filter(t=>t.type==='Loan Repayment').reduce((s,t)=>s+Math.abs(t.cashOut!=null?t.cashOut:parseFloat(t.amount)||0),0);
+  const repTotal=txns.filter(t=>t.type==='Loan Repayment').reduce((s,t)=>s+Math.abs(parseFloat(t.amount)||0),0); // principal; interest is under its expense category
   const assetTotal=txns.filter(t=>t.type==='Asset Purchase').reduce((s,t)=>s+Math.abs(parseFloat(t.amount)||0),0);
   if(invLossTotal) byCatOut['Investment Losses']=invLossTotal;
   if(invFundTotal) byCatOut['Investment Funding']=invFundTotal;
@@ -2596,7 +2597,7 @@ function renderBalanceSheet() {
   const bal=calcAccountBalances();
   const classes=['Cash','Investment','Real Asset','Alternative Asset','Liability'], grouped={};
   classes.forEach(c=>grouped[c]=[]);
-  data.accounts.forEach(a=>{ const cls=data.bsMapping[a.name]||'Cash'; grouped[cls].push({name:a.name,balance:bal[a.name]||0}); });
+  data.accounts.forEach(a=>{ const cls=data.bsMapping[a.name]||'Cash'; grouped[cls].push({name:a.name+(a.archived?' (archived)':''),balance:bal[a.name]||0}); });
   const cT=grouped['Cash'].reduce((s,a)=>s+a.balance,0);
   const iT=grouped['Investment'].reduce((s,a)=>s+a.balance,0);
   const rT=grouped['Real Asset'].reduce((s,a)=>s+a.balance,0);
@@ -2727,10 +2728,12 @@ function renderSettingsAccounts() {
           <input type="color" class="color-picker" id="color-picker-${i}" value="${a.color||'#4A9BDB'}">
         </div>
         <div style="flex:1;min-width:0;">
-          <div class="settings-item-name">${a.name}</div>
+          <div class="settings-item-name"${a.archived?' style="opacity:0.55;"':''}>${a.name}${a.archived?' <span style="font-size:11px;font-weight:600;color:#94A3B8;">· Archived</span>':''}</div>
           <div class="picker-field small" data-picker-target="acc-type-${i}" data-acc-type-idx="${i}" style="margin-top:4px;"><span class="picker-value">${a.type}</span><i class="ti ti-chevron-down picker-chevron"></i></div>
         </div>
-        <button class="icon-btn" data-del-acc="${a.name}"><i class="ti ti-trash"></i></button>
+        ${a.archived
+          ? `<button class="icon-btn" data-restore-acc="${i}" title="Restore"><i class="ti ti-arrow-back-up"></i></button>`
+          : `<button class="icon-btn" data-del-acc="${a.name}"><i class="ti ti-trash"></i></button>`}
       </div>`).join('')}
     </div>
     <div class="settings-input-row" style="padding:8px 16px 0;">
@@ -2769,9 +2772,30 @@ function renderSettingsAccounts() {
   });
 
   el.querySelectorAll('[data-del-acc]').forEach(btn=>{
-    btn.addEventListener('click',()=>confirm_('Delete account "'+btn.dataset.delAcc+'"?','Existing transactions will remain.',()=>{
-      data.accounts=data.accounts.filter(a=>a.name!==btn.dataset.delAcc);saveData();renderSettingsAccounts();
-    }));
+    btn.addEventListener('click',()=>{
+      const name=btn.dataset.delAcc;
+      // entries / recurring templates that use this account
+      const used=data.transactions.filter(t=>t.account===name||t.toAccount===name).length;
+      const usedTpl=(data.recurringTransactions||[]).filter(r=>r.templateTxn&&(r.templateTxn.account===name||r.templateTxn.toAccount===name)).length;
+      if(used||usedTpl){
+        // can't delete without changing totals → archive instead
+        const what=[used?`${used} entr${used===1?'y':'ies'}`:'',usedTpl?`${usedTpl} recurring template${usedTpl===1?'':'s'}`:''].filter(Boolean).join(' and ');
+        confirm_('Archive account "'+name+'"?',`It has ${what}, so it can't be deleted. Archiving hides it from the Accounts card and pickers; its entries and balance still count. You can restore it here any time.`,()=>{
+          const acc=data.accounts.find(a=>a.name===name); if(acc) acc.archived=true;
+          saveData();renderSettingsAccounts();
+        });
+        return;
+      }
+      confirm_('Delete account "'+name+'"?','It has no entries.',()=>{
+        data.accounts=data.accounts.filter(a=>a.name!==name);saveData();renderSettingsAccounts();
+      });
+    });
+  });
+  el.querySelectorAll('[data-restore-acc]').forEach(btn=>{
+    btn.addEventListener('click',()=>{
+      const acc=data.accounts[parseInt(btn.dataset.restoreAcc)];
+      if(acc){ delete acc.archived; saveData(); renderSettingsAccounts(); }
+    });
   });
   document.getElementById('add-acc-btn').addEventListener('click',()=>{
     const name=document.getElementById('new-acc-name').value.trim();
@@ -2960,9 +2984,8 @@ function showRecurringEditPrompt(id) {
   overlay.addEventListener('click', e => { if(e.target===overlay) overlay.remove(); });
 }
 
-function openEditTemplate(txnId) {
-  // Find the matching recurring template for this transaction
-  const t = data.transactions.find(x=>x.id===txnId); if(!t) return;
+// Find the recurring template that created entry t (null if none can be identified safely)
+function findTemplateForTxn(t) {
   const recurringList = data.recurringTransactions||[];
   // 1) Direct link (entries created from v2.7 on carry recurringId)
   let template = t.recurringId!=null ? recurringList.find(r => r.id === t.recurringId) : null;
@@ -2981,6 +3004,13 @@ function openEditTemplate(txnId) {
       if(loose.length === 1) template = loose[0];
     }
   }
+  return template || null;
+}
+
+function openEditTemplate(txnId) {
+  // Find the matching recurring template for this transaction
+  const t = data.transactions.find(x=>x.id===txnId); if(!t) return;
+  const template = findTemplateForTxn(t);
   if(!template) { alert('Could not find the recurring template for this entry.'); return; }
 
   // Store template index for saving
@@ -3315,9 +3345,9 @@ function setupModalPickers() {
   bindPickerField('f-type', ()=>ALL_TYPES, 'Transaction Type', { search:false, onSelect: updateFormFields });
   bindPickerField('f-cat', ()=>getCatOptionsForCurrentType(), 'Category', { onSelect: (val)=>{ populateSubDropdown(val); applyInvestmentAutoSign(); } });
   bindPickerField('f-sub', ()=>data.subcategories[getFieldValue('f-cat')]||[], 'Subcategory', { onSelect: ()=>{ applyInvestmentAutoSign(); } });
-  bindPickerField('f-account', ()=>data.accounts.map(a=>a.name), 'Account');
-  bindPickerField('f-from-account', ()=>data.accounts.map(a=>a.name), 'From Account');
-  bindPickerField('f-to-account', ()=>data.accounts.map(a=>a.name), 'To Account');
+  bindPickerField('f-account', ()=>activeAccounts().map(a=>a.name), 'Account');
+  bindPickerField('f-from-account', ()=>activeAccounts().map(a=>a.name), 'From Account');
+  bindPickerField('f-to-account', ()=>activeAccounts().map(a=>a.name), 'To Account');
   bindPickerField('f-asset-account', ()=>assetAccountNames(), 'Asset Account');
   bindPickerField('f-purch-from', ()=>cashAccountNames(), 'Pay From');
   bindPickerField('f-liab-account', ()=>liabAccountNames(), 'Liability Account');
@@ -3331,9 +3361,10 @@ function setupModalPickers() {
   bindPickerField('f-trip', ()=>['No trip',...(data.trips||[]).map(t=>t.name)], 'Tag a Trip', { search:false });
 }
 
-function liabAccountNames() { return data.accounts.filter(a=>data.bsMapping[a.name]==='Liability').map(a=>a.name); }
-function assetAccountNames() { return data.accounts.filter(a=>['Real Asset','Alternative Asset','Investment'].includes(data.bsMapping[a.name])).map(a=>a.name); }
-function cashAccountNames() { return data.accounts.filter(a=>['Cash','Investment'].includes(data.bsMapping[a.name])||['Bank','Cash'].includes(a.type)).map(a=>a.name); }
+function activeAccounts() { return data.accounts.filter(a=>!a.archived); } // archived accounts are hidden from pickers
+function liabAccountNames() { return activeAccounts().filter(a=>data.bsMapping[a.name]==='Liability').map(a=>a.name); }
+function assetAccountNames() { return activeAccounts().filter(a=>['Real Asset','Alternative Asset','Investment'].includes(data.bsMapping[a.name])).map(a=>a.name); }
+function cashAccountNames() { return activeAccounts().filter(a=>['Cash','Investment'].includes(data.bsMapping[a.name])||['Bank','Cash'].includes(a.type)).map(a=>a.name); }
 
 function getCatOptionsForCurrentType() {
   const type = getFieldValue('f-type');
@@ -3443,7 +3474,7 @@ function updateFormFields() {
   // ensure account pickers have a valid default if empty
   ['f-account','f-from-account','f-to-account','f-asset-account','f-purch-from','f-liab-account','f-loan-deposit','f-rep-from','f-rep-liab','f-reval-account'].forEach(fid=>{
     if(!getFieldValue(fid)){
-      const all=data.accounts.map(a=>a.name);
+      const all=activeAccounts().map(a=>a.name);
       if(all.length) setFieldValue(fid, all[0]);
     }
   });
@@ -3866,11 +3897,15 @@ function deleteTxn(id) {
 }
 
 function removeRecurringTemplate(t) {
-  // find and remove the recurring template that matches this transaction's type/desc/account
-  if(!data.recurringTransactions) return;
-  data.recurringTransactions = data.recurringTransactions.filter(r =>
-    !(r.templateTxn.type===t.type && r.templateTxn.desc===t.desc && r.templateTxn.account===t.account)
-  );
+  // remove only the one template that created this entry (same lookup as "Edit the template")
+  if(!data.recurringTransactions) return false;
+  const template = findTemplateForTxn(t);
+  if(!template) {
+    alert('Could not find the recurring template for this entry. You can stop it from Settings → Data.');
+    return false;
+  }
+  data.recurringTransactions = data.recurringTransactions.filter(r => r !== template);
+  return true;
 }
 
 /* ============================================================
